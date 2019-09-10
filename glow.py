@@ -2,34 +2,36 @@
 # Keras implement of Glow
 # Glow模型的Keras版
 # https://blog.openai.com/glow/
-
-from keras.layers import *
-from keras.models import Model
-from keras.datasets import cifar10
-from keras.callbacks import Callback
-from keras.optimizers import Adam
-from flow_layers import *
-import imageio
-import numpy as np
-from scipy import misc
 import glob
 import os
 
+import imageio
+import keras.backend as K
+import numpy as np
+# from keras.datasets import cifar10
+from keras.callbacks import Callback
+from keras.layers import Activation, Conv2D, Input, Lambda
+from keras.models import Model
+from keras.optimizers import Adam
+from PIL import Image
+
+from flow_layers import (Actnorm, Concat, CondActnorm, CoupleWrapper, Permute,
+                         Reshape, Split, Squeeze)
 
 if not os.path.exists('samples'):
     os.mkdir('samples')
 
 
-imgs = glob.glob('../../CelebA-HQ/train/*.png')
+imgs = glob.glob('celeba/images/*.jpg')
 img_size = 64  # for a fast try, please use img_size=32
 depth = 10  # orginal paper use depth=32
 level = 3  # orginal paper use level=6 for 256*256 CelebA HQ
 
 
 def imread(f):
-    x = misc.imread(f, mode='RGB')
-    x = misc.imresize(x, (img_size, img_size))
-    x = x.astype(np.float32)
+    x = Image.open(f)
+    x = x.resize((img_size, img_size))
+    x = np.asarray(x)
     return x / 255 * 2 - 1
 
 
@@ -41,7 +43,7 @@ def data_generator(batch_size=64):
             X.append(imread(f))
             if len(X) == batch_size:
                 X = np.array(X)
-                yield X,X.reshape((X.shape[0], -1))
+                yield X, X.reshape((X.shape[0], -1))
                 X = []
 
 
@@ -51,20 +53,14 @@ def build_basic_model(in_channel):
     _in = Input(shape=(None, None, in_channel))
     _ = _in
     hidden_dim = 512
-    _ = Conv2D(hidden_dim,
-               (3, 3),
-               padding='same')(_)
+    _ = Conv2D(hidden_dim, (3, 3), padding='same')(_)
     # _ = Actnorm(add_logdet_to_loss=False)(_)
     _ = Activation('relu')(_)
-    _ = Conv2D(hidden_dim,
-               (1, 1),
-               padding='same')(_)
+    _ = Conv2D(hidden_dim, (1, 1), padding='same')(_)
     # _ = Actnorm(add_logdet_to_loss=False)(_)
     _ = Activation('relu')(_)
-    _ = Conv2D(in_channel,
-               (3, 3),
-               kernel_initializer='zeros',
-               padding='same')(_)
+    _ = Conv2D(in_channel, (3, 3),
+               kernel_initializer='zeros', padding='same')(_)
     return Model(_in, _)
 
 
@@ -83,7 +79,8 @@ x = x_in
 x_outs = []
 
 # 给输入加入噪声（add noise into inputs for stability.）
-x = Lambda(lambda s: K.in_train_phase(s + 1./256 * K.random_uniform(K.shape(s)), s))(x)
+x = Lambda(lambda s: K.in_train_phase(
+    s + 1./256 * K.random_uniform(K.shape(s)), s))(x)
 
 for i in range(level):
     x = squeeze(x)
@@ -133,7 +130,7 @@ for l in encoder.layers:
         encoder.add_loss(l.logdet)
 
 encoder.summary()
-encoder.compile(loss=lambda y_true,y_pred: 0.5 * K.sum(y_pred**2, 1) + 0.5 * np.log(2*np.pi) * K.int_shape(y_pred)[1],
+encoder.compile(loss=lambda y_true, y_pred: 0.5 * K.sum(y_pred**2, 1) + 0.5 * np.log(2*np.pi) * K.int_shape(y_pred)[1],
                 optimizer=Adam(1e-4))
 
 
@@ -150,14 +147,14 @@ x = final_actnorm.inverse()(x)
 x1 = x
 
 
-for i,(split,condactnorm,reshape) in enumerate(zip(*outer_layers)[::-1]):
+for i, (split, condactnorm, reshape) in enumerate(list(zip(*outer_layers))[::-1]):
     if i > 0:
         x1 = x
         x_out = outputs[-i]
         x_out = reshape.inverse()(x_out)
         x2 = condactnorm.inverse()([x_out, x1])
         x = split.inverse()([x1, x2])
-    for j,(actnorm,permute,split,couple,concat) in enumerate(zip(*inner_layers)[::-1][i*depth: (i+1)*depth]):
+    for j, (actnorm, permute, split, couple, concat) in enumerate(list(zip(*inner_layers))[::-1][i*depth: (i+1)*depth]):
         x1, x2 = concat.inverse()(x)
         x1, x2 = couple.inverse()([x1, x2])
         x = split.inverse()([x1, x2])
@@ -190,6 +187,7 @@ def sample(path, std=1):
 class Evaluate(Callback):
     def __init__(self):
         self.lowest = 1e10
+
     def on_epoch_end(self, epoch, logs=None):
         path = 'samples/test_%s.png' % epoch
         sample(path, 0.9)
